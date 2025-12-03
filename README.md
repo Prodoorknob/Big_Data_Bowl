@@ -1,6 +1,6 @@
 # Big Data Bowl 2026: Air Play IQ - Post-Throw Convergence Analysis
 
-## 🏈 Project Overview
+## Project Overview
 
 This project introduces **Air Play IQ**, a novel metric system that evaluates wide receiver performance during the critical post-throw phase of a passing play. While traditional metrics focus on pre-snap alignment or route running, our approach captures what happens *after* the ball leaves the quarterback's hand—specifically, how efficiently a receiver **converges** toward the ball's landing location.
 
@@ -12,7 +12,7 @@ Our LSTM-based model learns the expected convergence behavior from successful pl
 
 ---
 
-## 📊 Metrics Produced
+## Metrics Produced
 
 | Metric | Description | Interpretation |
 |--------|-------------|----------------|
@@ -32,7 +32,7 @@ Our LSTM-based model learns the expected convergence behavior from successful pl
 
 ---
 
-## 🔬 Methodology: Post-Throw Convergence Analysis
+## Methodology: Post-Throw Convergence Analysis
 
 ### What is "Convergence Rate"?
 
@@ -99,7 +99,7 @@ Output: Predicted convergence rate per frame
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 Big_Data_Bowl/
@@ -127,7 +127,7 @@ Big_Data_Bowl/
 
 ---
 
-## 🔄 Analysis Pipeline
+## Analysis Pipeline
 
 ### Phase 1: Route Execution (Supporting Context)
 
@@ -177,7 +177,7 @@ Big_Data_Bowl/
 
 ---
 
-## 📈 Key Results
+## Key Results
 
 ### Model Performance
 
@@ -209,7 +209,7 @@ Top performers by AirPlayIQ_WR (qualified by volume):
 
 ---
 
-## 🎯 Use Cases for Teams
+## Use Cases for Teams
 
 ### 1. Player Evaluation
 - Identify receivers who excel at ball tracking vs. route running
@@ -285,18 +285,17 @@ metrics = pd.read_csv('air_play_iq_metrics_final.csv')
 
 ---
 
-## 🔮 Future Work
+## Future Work
 
-1. **Steam Data Integration**: Scrape Steam for additional game metadata to improve recommendations
 2. **Defender Analysis**: Extend model to evaluate closest defender behavior
 3. **QB Evaluation**: Model expected throw location and timing
 4. **Real-time Application**: Deploy model for live game analysis
 
 ---
 
-## 👥 Contributors
+## Contributors
 
-Big Data Bowl 2026 Submission Team
+Rajashekar Reddy Vedire, Guyon Ganchi
 
 ---
 
