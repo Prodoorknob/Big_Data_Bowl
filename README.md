@@ -82,9 +82,11 @@ These metrics are designed to be:
 
 ## Sample Analysis Output
 
-Figure: metric correlation view of derived receiver metrics with contextual features. There is a positive correlation between TrueSpeed and Expected Points Added (EPA), but a negative correlation between Route Execution and EPA.
+Figure: metric correlation view of derived receiver metrics with contextual features. 
 
 ![Metric correlation](outputs/metric_correlation.png)
+
+There is a positive correlation between TrueSpeed and Expected Points Added (EPA), but a negative correlation between Route Execution and EPA.
 
 ---
 
