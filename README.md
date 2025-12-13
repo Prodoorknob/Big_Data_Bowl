@@ -94,10 +94,9 @@ There is a positive correlation between TrueSpeed and Expected Points Added (EPA
 
 ```text
 Big_Data_Bowl/
-├── data/                # Processed and intermediate datasets
+├── models/              # LSTM outputs
 ├── notebooks/           # Feature engineering, modeling, and analysis
 ├── outputs/             # Figures and analytical outputs
-├── src/                 # Helper functions and reusable logic
 └── README.md
 ```
 
