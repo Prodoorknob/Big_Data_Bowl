@@ -292,3 +292,39 @@ def filter_to_completed_catches(
     ].loc[:, list(keys)]
 
     return df_in.merge(plays_completed, on=list(keys), how="inner")
+
+def attach_output_labels(
+    df_post: pd.DataFrame,
+    df_out: pd.DataFrame,
+    *,
+    keys: Tuple[str, str, str, str] = ("game_id", "play_id", "nfl_id", "frame_id"),
+    out_x: str = "x",
+    out_y: str = "y",
+    label_x: str = "y_true_x",
+    label_y: str = "y_true_y",
+    how: str = "inner",
+) -> pd.DataFrame:
+    """
+    Join df_output (ground-truth x,y) onto the post-throw feature table.
+
+    Result columns:
+      - y_true_x, y_true_y as label positions
+    """
+    for k in keys:
+        if k not in df_post.columns:
+            raise KeyError(f"df_post missing join key: {k}")
+        if k not in df_out.columns:
+            raise KeyError(f"df_out missing join key: {k}")
+    for c in (out_x, out_y):
+        if c not in df_out.columns:
+            raise KeyError(f"df_out missing required column: {c}")
+
+    out = df_out.loc[:, [*keys, out_x, out_y]].copy()
+    out = out.rename(columns={out_x: label_x, out_y: label_y})
+
+    merged = df_post.merge(out, on=list(keys), how=how)
+
+    # Fail loudly if join dropped lots of rows (common silent bug)
+    if how == "inner" and len(merged) == 0:
+        raise ValueError("attach_output_labels() produced 0 rows. Check join keys/dtypes.")
+    return merged

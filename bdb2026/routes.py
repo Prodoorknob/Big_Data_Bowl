@@ -30,7 +30,6 @@ class RouteClusterResult:
     assignments: pd.DataFrame         # (game_id, play_id, nfl_id, route_cluster)
     centroids: pd.DataFrame           # cluster centroids in original feature space
 
-
 def engineer_route_features(
     df_routes: pd.DataFrame,
     *,
@@ -40,21 +39,13 @@ def engineer_route_features(
     y_col: str = Y_NORM,
     speed_col: str = SPEED,
 ) -> pd.DataFrame:
-    """Engineer per-route (per play) features.
-
-    Expected input: tracking rows for the route runner during the pre-throw window.
-    If you only have raw x/y, call `normalize_coordinates` and `add_derived_features` first.
-
-    Returns
-    -------
-    DataFrame with one row per (game_id, play_id, nfl_id) and engineered features.
-    """
+    """Engineer per-route (per play/player) features from pre-throw tracking rows."""
     df = df_routes.copy()
     df = df.sort_values(list(id_cols) + [frame_col])
 
-    # Basic deltas within route
     g = df.groupby(list(id_cols), sort=False)
 
+    # Start / end
     x0 = g[x_col].first()
     y0 = g[y_col].first()
     x1 = g[x_col].last()
@@ -63,21 +54,23 @@ def engineer_route_features(
     dx = x1 - x0
     dy = y1 - y0
 
-    # Route length approximated by summing step distances
-    step_dist = np.sqrt(g[x_col].diff() ** 2 + g[y_col].diff() ** 2)
-    route_len = step_dist.groupby(level=list(range(len(id_cols)))).sum()
+    # Robust route length using shift
+    df["_x_prev"] = g[x_col].shift(1)
+    df["_y_prev"] = g[y_col].shift(1)
+    df["_step_dist"] = np.sqrt((df[x_col] - df["_x_prev"]) ** 2 + (df[y_col] - df["_y_prev"]) ** 2)
+    df["_step_dist"] = df["_step_dist"].fillna(0.0)
 
-    # Straight-line distance
+    route_len = g["_step_dist"].sum()
+
+    # Straight-line distance + straightness
     direct_dist = np.sqrt(dx ** 2 + dy ** 2)
+    straightness = (direct_dist / route_len.replace(0, np.nan)).fillna(0.0)
 
-    # Straightness ratio (1 = perfectly straight)
-    straightness = (direct_dist / route_len.replace(0, np.nan)).fillna(0)
-
-    # Speed summaries (if available)
+    # Speed summaries
     if speed_col in df.columns:
         mean_speed = g[speed_col].mean()
         max_speed = g[speed_col].max()
-        std_speed = g[speed_col].std().fillna(0)
+        std_speed = g[speed_col].std().fillna(0.0)
     else:
         mean_speed = pd.Series(np.nan, index=x0.index)
         max_speed = pd.Series(np.nan, index=x0.index)
@@ -101,9 +94,8 @@ def engineer_route_features(
         "std_speed": std_speed,
     }).reset_index()
 
+    # cleanup temp cols (optional; df is local anyway)
     return feats
-
-
 def cluster_routes_kmeans(
     route_features: pd.DataFrame,
     *,
@@ -123,7 +115,27 @@ def cluster_routes_kmeans(
         ]
         feature_cols = [c for c in candidate if c in feats.columns]
 
-    X = feats[list(feature_cols)].astype(float).to_numpy()
+    Xdf = feats.loc[:, list(feature_cols)].copy()
+
+    # Coerce to numeric; anything weird becomes NaN
+    for c in Xdf.columns:
+        Xdf[c] = pd.to_numeric(Xdf[c], errors="coerce")
+
+    # Replace inf/-inf, then impute
+    Xdf = Xdf.replace([np.inf, -np.inf], np.nan)
+
+    # Option A (recommended): median imputation
+    Xdf = Xdf.fillna(Xdf.median(numeric_only=True))
+
+    # If a column is all-NaN (median becomes NaN), fall back to 0
+    Xdf = Xdf.fillna(0.0)
+
+    X = Xdf.to_numpy(dtype=float)
+    
+    if np.isnan(X).any():
+        nan_cols = Xdf.columns[Xdf.isna().any()].tolist()
+        raise ValueError(f"NaNs remain in clustering features after imputation. Columns: {nan_cols}")
+    
     scaler = StandardScaler()
     Xs = scaler.fit_transform(X)
 
