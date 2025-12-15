@@ -1,4 +1,6 @@
-"""
+"""Data preparation utilities.
+
+Key ideas reflected from the notebook:
 - Normalize field direction so offense moves left-to-right (optional, controlled by args).
 - Create engineered post-throw features used for sequence modeling.
 - Provide lightweight filters for targeted WR route modeling.
@@ -6,7 +8,7 @@
 
 from __future__ import annotations
 
-from typing import Iterable, Optional, Tuple
+from typing import Iterable, Optional, Tuple, Set
 
 import numpy as np
 import pandas as pd
@@ -168,6 +170,58 @@ def add_postthrow_features(
     return out
 
 
+def merge_route_embeddings(
+    postthrow_df: pd.DataFrame,
+    route_embeddings: pd.DataFrame,
+    *,
+    how: str = "left",
+    key_cols: Tuple[str, ...] = (GAME_ID, PLAY_ID, NFL_ID),
+    fill_value: float = 0.0,
+) -> pd.DataFrame:
+    """Merge per-play route embeddings into the post-throw frame table.
+
+    Route embeddings are typically static per play (and optionally per receiver),
+    so after this merge each post-throw frame row will carry the same embedding
+    values for that play/receiver.
+
+    Notes
+    -----
+    - If `route_embeddings` is keyed only by (gameId, playId), the merge still works
+      when NFL_ID is missing.
+    - Any missing embedding values after merge are filled with `fill_value`
+      (useful when a play was not clustered, or was filtered out).
+
+    Parameters
+    ----------
+    postthrow_df:
+        Frame-level post-throw table (the LSTM sequence rows).
+    route_embeddings:
+        Output of `routes.make_route_embedding_table(...)` or equivalent.
+    how:
+        Merge type (default "left").
+    key_cols:
+        Keys to join on. Only the intersection of available columns is used.
+    fill_value:
+        Value to fill for missing embedding columns after merge.
+
+    Returns
+    -------
+    DataFrame with embedding columns appended.
+    """
+    left_keys = [c for c in key_cols if c in postthrow_df.columns and c in route_embeddings.columns]
+    if not left_keys:
+        raise ValueError("No common key columns between postthrow_df and route_embeddings.")
+
+    out = postthrow_df.merge(route_embeddings, on=left_keys, how=how)
+
+    # Fill embedding columns only (non-key, non-numeric safe fill)
+    emb_cols = [c for c in route_embeddings.columns if c not in left_keys]
+    for c in emb_cols:
+        if c in out.columns:
+            out[c] = out[c].fillna(fill_value)
+    return out
+
+
 def filter_targeted_wr_routes(
     df_supp: pd.DataFrame,
     *,
@@ -183,3 +237,58 @@ def filter_targeted_wr_routes(
     if route_col in out.columns and drop_routes:
         out = out[~out[route_col].isin(list(drop_routes))].copy()
     return out
+
+def select_target_receiver_rows(
+    df_in: pd.DataFrame,
+    *,
+    keys: Tuple[str, str, str] = ("game_id", "play_id", "nfl_id"),
+    require_wr: bool = True,
+) -> pd.DataFrame:
+    """
+    Select the targeted receiver rows for modeling.
+
+    Operational definition for your dataset:
+      - player_to_predict == True (post-throw tracked/prediction target)
+      - player_side == offense
+      - player_position == WR (optional but default True)
+    """
+    for col in ("player_to_predict", "player_side", "player_position"):
+        if col not in df_in.columns:
+            raise KeyError(f"df_in missing required column: {col}")
+    for k in keys:
+        if k not in df_in.columns:
+            raise KeyError(f"df_in missing key: {k}")
+
+    df = df_in[df_in["player_to_predict"] == True].copy()
+    df = df[df["player_side"].astype(str).str.lower().eq("offense")].copy()
+    if require_wr:
+        df = df[df["player_position"].astype(str).str.upper().eq("WR")].copy()
+    return df
+
+
+def filter_to_completed_catches(
+    df_in: pd.DataFrame,
+    df_supp: pd.DataFrame,
+    *,
+    pass_result_col: str = "pass_result",
+    completed_code: str = "C",
+    keys: Tuple[str, str] = ("game_id", "play_id"),
+) -> pd.DataFrame:
+    """
+    Keep only completed passes using df_supp.pass_result == 'C'.
+    """
+    for k in keys:
+        if k not in df_in.columns or k not in df_supp.columns:
+            raise KeyError(f"Missing join key '{k}' in df_in/df_supp")
+    if pass_result_col not in df_supp.columns:
+        raise KeyError(f"df_supp missing column: {pass_result_col}")
+
+    plays_completed = (
+        df_supp.loc[:, [*keys, pass_result_col]]
+        .drop_duplicates(subset=list(keys))
+    )
+    plays_completed = plays_completed[
+        plays_completed[pass_result_col].astype(str).str.upper().eq(completed_code.upper())
+    ].loc[:, list(keys)]
+
+    return df_in.merge(plays_completed, on=list(keys), how="inner")

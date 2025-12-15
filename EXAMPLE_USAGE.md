@@ -43,3 +43,26 @@ df_pred = (
 ts = compute_truespeed(df_pred, actual_col="actual", pred_col="pred", id_cols=("game_id","play_id"), agg="mean")
 ts.head()
 ```
+
+
+## Using route embeddings as LSTM inputs
+
+```python
+from bdb2026.routes import cluster_routes, make_route_embedding_table
+from bdb2026.preprocess import add_postthrow_features, merge_route_embeddings
+
+# 1) Build route features on the pre-throw window (targeted receiver), then cluster
+route_result = cluster_routes(df_prethrow_wr, n_clusters=12)
+route_emb = make_route_embedding_table(route_result.assignments, n_clusters=12, prefix='route_emb')
+
+# 2) Engineer post-throw features (frame-level) and merge the static embedding columns
+post = add_postthrow_features(df_postthrow)
+post = merge_route_embeddings(post, route_emb)
+
+# 3) Include route_emb_* columns in feature_cols when building LSTM tensors
+feature_cols = [
+    'dist_to_land','bearing_to_land','heading_align_cos','speed',
+] + [c for c in post.columns if c.startswith('route_emb_')]
+
+X, y, keys = build_lstm_tensors(post, feature_cols=feature_cols, target_col='converge_rate')
+```

@@ -145,3 +145,65 @@ def cluster_routes_kmeans(
         assignments=assignments,
         centroids=centroids,
     )
+
+
+def make_route_embedding_table(
+    assignments: pd.DataFrame,
+    *,
+    label_col: str = "route_cluster",
+    n_clusters: Optional[int] = None,
+    prefix: str = "route_emb",
+    key_cols: Sequence[str] = (GAME_ID, PLAY_ID, NFL_ID),
+    encoding: str = "onehot",
+    dtype: str = "float32",
+) -> pd.DataFrame:
+    """Create a per-play (optionally per-player) route-embedding table.
+
+    Parameters
+    ----------
+    assignments:
+        Output from `cluster_routes(...).assignments`, containing keys and `label_col`.
+    label_col:
+        Column holding integer cluster IDs.
+    n_clusters:
+        Total number of clusters. If None, inferred as max(label)+1.
+    prefix:
+        Prefix for embedding columns.
+    key_cols:
+        Key columns to keep/merge on. If some keys are missing in `assignments`,
+        they are ignored.
+    encoding:
+        - "onehot": returns one-hot columns {prefix}_0..{prefix}_{K-1}.
+        - "id": returns a single integer column `{prefix}_id`.
+    dtype:
+        dtype for the embedding columns.
+
+    Returns
+    -------
+    DataFrame with key columns and embedding columns.
+    """
+    if label_col not in assignments.columns:
+        raise ValueError(f"assignments must include '{label_col}'")
+
+    keys = [c for c in key_cols if c in assignments.columns]
+    if not keys:
+        raise ValueError("No merge keys found in assignments; expected at least one of "
+                         f"{list(key_cols)}")
+
+    out = assignments[keys + [label_col]].drop_duplicates().copy()
+    labels = out[label_col].astype(int).to_numpy()
+    if n_clusters is None:
+        n_clusters = int(labels.max()) + 1 if labels.size else 0
+
+    encoding = encoding.lower().strip()
+    if encoding == "id":
+        out[f"{prefix}_id"] = labels.astype("int32")
+        return out.drop(columns=[label_col])
+
+    if encoding != "onehot":
+        raise ValueError("encoding must be one of {'onehot','id'}")
+
+    # One-hot
+    for k in range(n_clusters):
+        out[f"{prefix}_{k}"] = (labels == k).astype(dtype)
+    return out.drop(columns=[label_col])
