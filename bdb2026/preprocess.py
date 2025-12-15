@@ -16,12 +16,15 @@ import pandas as pd
 from .config import (
     GAME_ID, PLAY_ID, FRAME_ID, NFL_ID,
     X, Y, X_NORM, Y_NORM,
-    BALL_LAND_X, BALL_LAND_Y,
+    BALL_LAND_X, BALL_LAND_Y, BALL_LAND_X_NORM, BALL_LAND_Y_NORM,
     DX, DY, SPEED,
     DIST_TO_LAND, BEARING_TO_LAND,
     HEADING, HEADING_ALIGN_COS,
     TIME_SINCE_THROW,
+    CONVERGE_RATE,
+    Y_TRUE_X, Y_TRUE_Y, Y_TRUE_X_NORM, Y_TRUE_Y_NORM,
 )
+
 
 
 def normalize_to_100(x: pd.Series, *, x_min: float = 0.0, x_max: float = 120.0) -> pd.Series:
@@ -43,30 +46,56 @@ def normalize_coordinates(
     x_out: str = X_NORM,
     y_out: str = Y_NORM,
 ) -> pd.DataFrame:
-    """Create normalized coordinates (x_norm, y_norm).
+    """Create normalized coordinates (x_norm, y_norm) and normalized landing coords.
 
-    If `offense_left_to_right=True` and the dataset includes a `play_direction` column
-    with values like 'left'/'right', then plays going left are flipped so offense
-    always advances to increasing x.
+    If `offense_left_to_right=True` and `play_direction` exists, plays going left are
+    flipped so offense always advances to increasing x.
 
     Notes
     -----
-    - This function is intentionally conservative: if `play_direction_col` is missing,
-      it will simply copy x/y to x_norm/y_norm.
-    - y is not flipped (the field width is symmetric); keep as-is unless you have a reason.
+    - y is not flipped (field width symmetric) unless you explicitly choose to.
+    - If ball landing columns exist (ball_land_x/ball_land_y), this also creates
+      ball_land_x_norm/ball_land_y_norm using the same x-flip logic.
     """
     out = df.copy()
+
+    # Always normalize/cast y
     out[y_out] = out[y_col].astype(float)
 
-    if not offense_left_to_right or play_direction_col not in out.columns:
+    has_dir = play_direction_col in out.columns
+    if offense_left_to_right and has_dir:
+        direction = out[play_direction_col].astype(str).str.lower()
+        x = out[x_col].astype(float)
+        out[x_out] = np.where(direction.eq("left"), 120.0 - x, x)
+    else:
+        # No direction available, or caller opted out of flipping
         out[x_out] = out[x_col].astype(float)
-        return out
+        direction = None  # for landing flip logic
+
+    # Normalize ball landing point to match x_norm/y_norm (if present)
+    if BALL_LAND_X in out.columns and BALL_LAND_Y in out.columns:
+        lx = out[BALL_LAND_X].astype(float)
+        ly = out[BALL_LAND_Y].astype(float)
+        out[BALL_LAND_Y_NORM] = ly
+        if offense_left_to_right and has_dir:
+            out[BALL_LAND_X_NORM] = np.where(direction.eq("left"), 120.0 - lx, lx)
+        else:
+            out[BALL_LAND_X_NORM] = lx
+
+    return out
 
     direction = out[play_direction_col].astype(str).str.lower()
     x = out[x_col].astype(float)
 
     # Typical tracking coordinates: x from 0..120 (end zone to end zone). Flip for 'left'.
     out[x_out] = np.where(direction.eq("left"), 120.0 - x, x)
+
+    # Normalize ball landing point to match x_norm/y_norm (if present)
+    if BALL_LAND_X in out.columns and BALL_LAND_Y in out.columns:
+        lx = out[BALL_LAND_X].astype(float)
+        ly = out[BALL_LAND_Y].astype(float)
+        out[BALL_LAND_Y_NORM] = ly
+        out[BALL_LAND_X_NORM] = np.where(direction.eq("left"), 120.0 - lx, lx)
     return out
 
 
@@ -133,11 +162,15 @@ def add_postthrow_features(
     out = add_derived_features(out, x_col=x_col, y_col=y_col, dt_seconds=dt_seconds)
 
     # distance and bearing to landing point
-    if land_x_col in out.columns and land_y_col in out.columns:
+    # Prefer normalized landing columns if available
+    lx_col = BALL_LAND_X_NORM if BALL_LAND_X_NORM in out.columns else land_x_col
+    ly_col = BALL_LAND_Y_NORM if BALL_LAND_Y_NORM in out.columns else land_y_col
+
+    if lx_col in out.columns and ly_col in out.columns:
         x = out[x_col].astype(float).to_numpy()
         y = out[y_col].astype(float).to_numpy()
-        lx = out[land_x_col].astype(float).to_numpy()
-        ly = out[land_y_col].astype(float).to_numpy()
+        lx = out[lx_col].astype(float).to_numpy()
+        ly = out[ly_col].astype(float).to_numpy()
 
         out[DIST_TO_LAND] = np.sqrt((lx - x) ** 2 + (ly - y) ** 2)
         out[BEARING_TO_LAND] = _bearing(x, y, lx, ly)
@@ -293,6 +326,118 @@ def filter_to_completed_catches(
 
     return df_in.merge(plays_completed, on=list(keys), how="inner")
 
+
+def compute_initial_separation_at_throw(
+    df_in_full: pd.DataFrame,
+    *,
+    play_keys: Tuple[str, str] = (GAME_ID, PLAY_ID),
+    player_key: str = NFL_ID,
+    frame_col: str = FRAME_ID,
+    x_col: str = X_NORM,
+    y_col: str = Y_NORM,
+    side_col: str = "player_side",
+    pos_col: str = "player_position",
+    target_flag_col: str = "player_to_predict",
+    offense_value: str = "offense",
+    defense_value: str = "defense",
+    wr_value: str = "WR",
+    out_col: str = "initial_separation",
+) -> pd.DataFrame:
+    """Compute initial separation at throw for the targeted WR.
+
+    Definition
+    ----------
+    - Throw moment: the last input frame for each (game_id, play_id) in df_input.
+    - Targeted WR row: player_to_predict == True AND offense AND WR.
+    - initial_separation: minimum Euclidean distance to any defender at the throw frame.
+
+    Returns
+    -------
+    DataFrame keyed by (game_id, play_id, nfl_id) with one column: initial_separation.
+    """
+    req = [*play_keys, player_key, frame_col, x_col, y_col, side_col, pos_col, target_flag_col]
+    missing = [c for c in req if c not in df_in_full.columns]
+    if missing:
+        raise KeyError(f"compute_initial_separation_at_throw missing columns: {missing}")
+
+    df = df_in_full.copy()
+
+    # Throw frame per play (last frame in input)
+    throw_frames = (
+        df.groupby(list(play_keys), as_index=False)[frame_col]
+        .max()
+        .rename(columns={frame_col: "throw_frame"})
+    )
+
+    df_throw = df.merge(throw_frames, on=list(play_keys), how="inner")
+    df_throw = df_throw[df_throw[frame_col] == df_throw["throw_frame"]].copy()
+
+    # Targeted WR at throw
+    target_mask = (
+        (df_throw[target_flag_col] == True)
+        & (df_throw[side_col].astype(str).str.lower().eq(offense_value))
+        & (df_throw[pos_col].astype(str).str.upper().eq(wr_value.upper()))
+    )
+    targets = df_throw.loc[target_mask, [*play_keys, player_key, x_col, y_col]].copy()
+
+    # Defenders at throw
+    def_mask = df_throw[side_col].astype(str).str.lower().eq(defense_value)
+    defenders = df_throw.loc[def_mask, [*play_keys, x_col, y_col]].copy()
+
+    if len(targets) == 0:
+        return targets.assign(**{out_col: pd.Series(dtype=float)})
+
+    # Join targets to all defenders in same play
+    td = targets.merge(defenders, on=list(play_keys), how="left", suffixes=("", "_def"))
+    td["_def_dist"] = np.sqrt(
+        (td[x_col].astype(float) - td[f"{x_col}_def"].astype(float)) ** 2
+        + (td[y_col].astype(float) - td[f"{y_col}_def"].astype(float)) ** 2
+    )
+
+    sep = (
+        td.groupby([*play_keys, player_key], as_index=False)["_def_dist"]
+        .min()
+        .rename(columns={"_def_dist": out_col})
+    )
+    return sep
+
+
+def add_converge_rate_from_labels(
+    df_labeled: pd.DataFrame,
+    *,
+    group_cols: Tuple[str, str, str] = (GAME_ID, PLAY_ID, NFL_ID),
+    frame_col: str = FRAME_ID,
+    true_x_col: str = Y_TRUE_X_NORM,
+    true_y_col: str = Y_TRUE_Y_NORM,
+    land_x_col: str = BALL_LAND_X_NORM,
+    land_y_col: str = BALL_LAND_Y_NORM,
+    dt_seconds: float = 0.1,
+    out_col: str = CONVERGE_RATE,
+) -> pd.DataFrame:
+    """Compute converge_rate from ground-truth (output) labels.
+
+    converge_rate[t] = (dist[t-1] - dist[t]) / dt_seconds
+    where dist[t] is distance from true position to the landing point at timestep t.
+
+    Positive values mean the player is closing toward the landing point.
+    """
+    req = [*group_cols, frame_col, true_x_col, true_y_col, land_x_col, land_y_col]
+    missing = [c for c in req if c not in df_labeled.columns]
+    if missing:
+        raise KeyError(f"add_converge_rate_from_labels missing columns: {missing}")
+
+    out = df_labeled.copy()
+    out = out.sort_values(list(group_cols) + [frame_col])
+
+    dx = out[true_x_col].astype(float) - out[land_x_col].astype(float)
+    dy = out[true_y_col].astype(float) - out[land_y_col].astype(float)
+    out["_dist_true_to_land"] = np.sqrt(dx ** 2 + dy ** 2)
+
+    prev = out.groupby(list(group_cols), sort=False)["_dist_true_to_land"].shift(1)
+    out[out_col] = ((prev - out["_dist_true_to_land"]) / dt_seconds).fillna(0.0)
+
+    return out.drop(columns=["_dist_true_to_land"], errors="ignore")
+
 def attach_output_labels(
     df_post: pd.DataFrame,
     df_out: pd.DataFrame,
@@ -327,4 +472,17 @@ def attach_output_labels(
     # Fail loudly if join dropped lots of rows (common silent bug)
     if how == "inner" and len(merged) == 0:
         raise ValueError("attach_output_labels() produced 0 rows. Check join keys/dtypes.")
+
+    # Normalize label coordinates to match x_norm/y_norm so downstream targets are consistent.
+    # We use play_direction from df_post (already present in merged) to flip x for leftward plays.
+    if "play_direction" in merged.columns:
+        direction = merged["play_direction"].astype(str).str.lower()
+        yx = merged[label_x].astype(float)
+        yy = merged[label_y].astype(float)
+        merged[Y_TRUE_Y_NORM] = yy
+        merged[Y_TRUE_X_NORM] = np.where(direction.eq("left"), 120.0 - yx, yx)
+    else:
+        merged[Y_TRUE_X_NORM] = merged[label_x].astype(float)
+        merged[Y_TRUE_Y_NORM] = merged[label_y].astype(float)
+
     return merged

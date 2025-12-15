@@ -230,3 +230,67 @@ def create_individual_radar_charts(
 
     fig.tight_layout()
     return fig
+
+
+
+import matplotlib.pyplot as plt
+
+
+def plot_market_inefficiency_correlation(
+    df: pd.DataFrame,
+    *,
+    x_col: str = "TrueSpeed",
+    y_col: str = "EPA_Per_Target",
+    label_col: Optional[str] = "player_name",
+    title: str = "Market inefficiency correlation",
+    annotate_top_n: int = 10,
+) -> "plt.Figure":
+    """
+    Notebook 4.3-style correlation plot for market inefficiency.
+
+    Default columns match the TrueSpeed.csv-style output:
+      x_col: TrueSpeed (0-100)
+      y_col: EPA_Per_Target
+
+    Returns a matplotlib Figure.
+    """
+    work = df.copy()
+    work[x_col] = pd.to_numeric(work[x_col], errors="coerce")
+    work[y_col] = pd.to_numeric(work[y_col], errors="coerce")
+    work = work.dropna(subset=[x_col, y_col])
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.scatter(work[x_col], work[y_col], alpha=0.75)
+
+    # Trendline
+    if len(work) >= 2:
+        m, b = np.polyfit(work[x_col].to_numpy(), work[y_col].to_numpy(), 1)
+        xs = np.linspace(work[x_col].min(), work[x_col].max(), 200)
+        ax.plot(xs, m * xs + b, linewidth=2)
+
+        r = np.corrcoef(work[x_col], work[y_col])[0, 1]
+        ax.set_title(f"{title} (Pearson r={r:.2f})")
+    else:
+        ax.set_title(title)
+
+    ax.set_xlabel(x_col)
+    ax.set_ylabel(y_col)
+    ax.grid(True, linestyle="--", alpha=0.3)
+
+    # Annotate top N by |residual| from trendline (inefficiency candidates)
+    if label_col and label_col in work.columns and len(work) >= 3:
+        # residuals from fitted line
+        y_hat = m * work[x_col] + b
+        resid = (work[y_col] - y_hat).abs()
+        top = work.assign(_resid=resid).nlargest(annotate_top_n, "_resid")
+        for _, row in top.iterrows():
+            ax.annotate(
+                str(row[label_col]),
+                (row[x_col], row[y_col]),
+                textcoords="offset points",
+                xytext=(5, 5),
+                fontsize=8,
+            )
+
+    fig.tight_layout()
+    return fig

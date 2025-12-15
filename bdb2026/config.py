@@ -24,6 +24,17 @@ O = "o"                              # orientation (deg)
 BALL_LAND_X = "ball_land_x"
 BALL_LAND_Y = "ball_land_y"
 
+
+# Normalized ball landing location (consistent with x_norm/y_norm)
+BALL_LAND_X_NORM = "ball_land_x_norm"
+BALL_LAND_Y_NORM = "ball_land_y_norm"
+
+# Output/label positions (after attaching df_output)
+Y_TRUE_X = "y_true_x"
+Y_TRUE_Y = "y_true_y"
+Y_TRUE_X_NORM = "y_true_x_norm"
+Y_TRUE_Y_NORM = "y_true_y_norm"
+
 # Pass timing
 PASS_RELEASE_FRAME = "pass_release_frame"   # if present
 TIME_SINCE_THROW = "time_since_throw"       # engineered, seconds

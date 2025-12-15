@@ -1,94 +1,92 @@
 """Sequence building utilities for the LSTM phase.
-Key ideas:
-- group by play (and usually by targeted receiver)
-- for each play, build a fixed-length (max_len) tensor
-- pad with mask_value for short plays; truncate long plays
+
+This repo’s notebook-style usage expects:
+    X, y, keys = build_sequences(df_features, feature_cols=..., target_col="converge_rate", max_len=25)
+
+Design choice:
+- Sequence by (game_id, play_id). This matches your stated approach and the assumption
+  that you have exactly one modeled target receiver per play after filtering.
 """
 
 from __future__ import annotations
 
-from typing import List, Sequence, Tuple, Union
+from typing import List, Tuple
 
 import numpy as np
 import pandas as pd
 
-from .config import GAME_ID, PLAY_ID, NFL_ID, FRAME_ID
-
-
-PlayKey = Union[Tuple[int, int], Tuple[int, int, int]]
+from .config import GAME_ID, PLAY_ID, FRAME_ID
 
 
 def build_sequences(
     df: pd.DataFrame,
-    feature_cols: Sequence[str],
-    target_col: str,
     *,
-    max_len: int,
-    id_cols: Sequence[str] = (GAME_ID, PLAY_ID),
+    feature_cols: List[str],
+    target_col: str,
+    max_len: int = 25,
+    id_cols: Tuple[str, str] = (GAME_ID, PLAY_ID),
     frame_col: str = FRAME_ID,
-    mask_value: float = 0.0,
-    dropna_target: bool = False,
-) -> Tuple[np.ndarray, np.ndarray, List[PlayKey]]:
-    """Build padded sequences.
+    pad_value: float = 0.0,
+) -> Tuple[np.ndarray, np.ndarray, pd.DataFrame]:
+    """Build fixed-length sequences grouped by (game_id, play_id).
 
     Parameters
     ----------
     df:
-        Long-form frame-level table.
+        Frame-level feature table (one row per frame for the modeled player).
     feature_cols:
-        Columns to use as input features.
+        Feature columns to include in X.
     target_col:
-        Column to use as supervised target per timestep.
+        Frame-level target column (e.g., 'converge_rate').
     max_len:
-        Timesteps to pad/truncate to.
+        Maximum sequence length. Longer sequences are truncated to the *last* max_len rows.
     id_cols:
-        Identifiers for the sequence. Default is (game_id, play_id).
-        If you want per-player sequences, pass (game_id, play_id, nfl_id).
-    mask_value:
-        Value used for padding; choose consistently with the Masking layer.
-    dropna_target:
-        If True, drop rows where target_col is NaN before building sequences.
+        Sequence keys. Default (game_id, play_id).
+    frame_col:
+        Frame ordering column.
+    pad_value:
+        Value used to pad sequences shorter than max_len.
 
     Returns
     -------
-    X: (n_seq, max_len, n_features)
-    y: (n_seq, max_len, 1)
-    keys: list of id tuples aligned to sequences
+    X:
+        (N, max_len, F) float32 tensor
+    y:
+        (N, max_len) float32 tensor
+    keys:
+        DataFrame with one row per sequence and columns id_cols
     """
-    work = df.copy()
-    if dropna_target:
-        work = work.dropna(subset=[target_col])
+    required = [*id_cols, frame_col, target_col, *feature_cols]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise KeyError(f"build_sequences missing columns: {missing}")
 
-    # Ensure deterministic order
-    work = work.sort_values(list(id_cols) + [frame_col])
+    d = df.sort_values([*id_cols, frame_col]).copy()
 
-    X_list: List[np.ndarray] = []
-    y_list: List[np.ndarray] = []
-    keys: List[PlayKey] = []
+    keys = d.loc[:, list(id_cols)].drop_duplicates().reset_index(drop=True)
+    n_seq = len(keys)
+    n_feat = len(feature_cols)
 
-    for key, g in work.groupby(list(id_cols), sort=False):
-        g = g.sort_values(frame_col)
+    X = np.full((n_seq, max_len, n_feat), pad_value, dtype=np.float32)
+    y = np.full((n_seq, max_len), pad_value, dtype=np.float32)
 
-        Xg = g[list(feature_cols)].astype(float).to_numpy()
-        yg = g[[target_col]].astype(float).to_numpy()  # (t, 1)
+    key_to_idx = {tuple(row): i for i, row in enumerate(keys.to_numpy())}
 
-        # truncate
-        Xg = Xg[:max_len]
-        yg = yg[:max_len]
+    for key, grp in d.groupby(list(id_cols), sort=False):
+        # pandas gives key as tuple when len(id_cols) > 1
+        if not isinstance(key, tuple):
+            key = (key,)
+        i = key_to_idx[key]
 
-        # pad
-        t = Xg.shape[0]
-        if t < max_len:
-            pad_X = np.full((max_len - t, Xg.shape[1]), mask_value, dtype=float)
-            pad_y = np.full((max_len - t, 1), mask_value, dtype=float)
-            Xg = np.vstack([Xg, pad_X])
-            yg = np.vstack([yg, pad_y])
+        # Keep the last max_len frames (post-throw window is typically at the end)
+        grp = grp.tail(max_len)
+        L = len(grp)
 
-        X_list.append(Xg)
-        y_list.append(yg)
-        keys.append(key if isinstance(key, tuple) else (key,))
-
-    X = np.stack(X_list, axis=0) if X_list else np.empty((0, max_len, len(feature_cols)))
-    y = np.stack(y_list, axis=0) if y_list else np.empty((0, max_len, 1))
+        X[i, :L, :] = grp[feature_cols].astype(float).to_numpy()
+        y[i, :L] = grp[target_col].astype(float).to_numpy()
 
     return X, y, keys
+
+
+# Backwards-compatible aliases (if your older notebooks call these)
+build_lstm_tensors = build_sequences
