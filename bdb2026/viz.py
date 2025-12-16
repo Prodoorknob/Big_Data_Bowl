@@ -68,6 +68,7 @@ def animate_route_on_field(
     id_col: str = "nfl_id",
     size_col: str = "s",
     color_col: str = "s",
+    text_col: Optional[str] = None,
     hover_cols: Sequence[str] = ("s", "a", "dir"),
     height: int = 500,
     width: int = 1000,
@@ -91,6 +92,14 @@ def animate_route_on_field(
     df = tracking.copy()
     df = df.sort_values(frame_col)
 
+    # Plotly cannot accept NaNs in marker size. Tracking speed `s` can be missing
+    # for some rows (e.g., football or incomplete joins), so coerce + fill.
+    if size_col in df.columns:
+        df[size_col] = pd.to_numeric(df[size_col], errors="coerce").fillna(0.0)
+        df[size_col] = df[size_col].clip(lower=0.0)
+
+    use_text = text_col if (text_col and text_col in df.columns) else None
+
     fig = px.scatter(
         df,
         x=x_col,
@@ -100,11 +109,15 @@ def animate_route_on_field(
         size=size_col if size_col in df.columns else None,
         size_max=15,
         color=color_col if color_col in df.columns else None,
+        text=use_text,
         hover_data=[c for c in hover_cols if c in df.columns],
         title=title,
         range_x=[0, 120],
         range_y=[0, 53.3],
     )
+
+    if use_text:
+        fig.update_traces(mode="markers+text", textposition="top center", textfont_size=10)
     fig = add_nfl_field_shapes(fig)
     fig.update_layout(plot_bgcolor="white", height=height, width=width)
 
@@ -121,11 +134,17 @@ def animate_speed_comparison(
     game_id: int,
     play_id: int,
     player_name: str = "",
+    target_nfl_id: Optional[int] = None,
     truespeed_score: Optional[float] = None,
     x_col: str = "x_norm",
     y_col: str = "y_norm",
     frame_col: str = "frame_id",
     title_prefix: str = "",
+    show_only_defense_qb_target: bool = False,
+    pred_df: Optional[pd.DataFrame] = None,
+    pred_actual_col: str = "actual",
+    pred_pred_col: str = "pred",
+    annotation_xy: Tuple[float, float] = (6.0, 52.0),
     renderer: Optional[str] = None,
 ):
     """Convenience wrapper: concatenate pre-throw and post-throw tracking for a play and animate."""
@@ -135,13 +154,158 @@ def animate_speed_comparison(
     if len(play_in) == 0:
         raise ValueError(f"No input tracking rows for game_id={game_id}, play_id={play_id}")
 
-    full_play = pd.concat([play_in, play_out], ignore_index=True).sort_values(frame_col)
+    # Concatenate and ensure one row per (frame, player). If there are duplicates,
+    # plotly's animation can appear to "bounce" because a player has multiple positions
+    # in the same animation frame.
+    play_in = play_in.assign(_phase=0)
+    play_out = play_out.assign(_phase=1)
+    full_play = pd.concat([play_in, play_out], ignore_index=True)
+    full_play = full_play.sort_values([frame_col, "_phase"]) if frame_col in full_play.columns else full_play
+    if frame_col in full_play.columns and "nfl_id" in full_play.columns:
+        full_play = full_play.drop_duplicates(subset=[frame_col, "nfl_id"], keep="last")
+
+    # Create a monotonic animation frame index (0..N-1) even if original frame ids skip.
+    if frame_col in full_play.columns:
+        _f = pd.to_numeric(full_play[frame_col], errors="coerce")
+        # Fallback: preserve existing order if non-numeric
+        if _f.isna().all():
+            unique_frames = pd.Series(full_play[frame_col].astype(str).unique())
+        else:
+            unique_frames = pd.Series(_f.dropna().astype(int).unique()).sort_values()
+        frame_map = {v: i for i, v in enumerate(unique_frames.tolist())}
+        if _f.isna().all():
+            full_play["_frame_anim"] = full_play[frame_col].astype(str).map(frame_map).astype(int)
+        else:
+            full_play["_frame_anim"] = _f.dropna().astype(int).map(frame_map)
+            full_play["_frame_anim"] = full_play["_frame_anim"].fillna(method="ffill").fillna(0).astype(int)
+    else:
+        full_play["_frame_anim"] = 0
+
+    # Build on-field text labels:
+    # - Targeted receiver: show player_name (and position if available)
+    # - Everyone else: show position (fallback: role/side)
+    name_cols = ["displayName", "player_name", "player_display_name", "name"]
+    pos_cols = ["position", "pos"]
+    role_col = "player_role" if "player_role" in full_play.columns else None
+    side_col = "player_side" if "player_side" in full_play.columns else None
+    name_col = next((c for c in name_cols if c in full_play.columns), None)
+    pos_col = next((c for c in pos_cols if c in full_play.columns), None)
+
+    if target_nfl_id is None and role_col:
+        mask = full_play[role_col].astype(str).eq("Targeted Receiver")
+        if mask.any() and "nfl_id" in full_play.columns:
+            try:
+                target_nfl_id = int(full_play.loc[mask, "nfl_id"].dropna().iloc[0])
+            except Exception:
+                target_nfl_id = None
+
+    if target_nfl_id is None and player_name and name_col and "nfl_id" in full_play.columns:
+        mask = full_play[name_col].astype(str).str.contains(str(player_name), case=False, na=False)
+        if mask.any():
+            try:
+                target_nfl_id = int(full_play.loc[mask, "nfl_id"].dropna().iloc[0])
+            except Exception:
+                target_nfl_id = None
+
+    def _other_label(row: pd.Series) -> str:
+        if pos_col and pd.notna(row.get(pos_col)):
+            return str(row.get(pos_col))
+        if role_col and pd.notna(row.get(role_col)):
+            return str(row.get(role_col))
+        if side_col and pd.notna(row.get(side_col)):
+            return str(row.get(side_col))
+        return ""
+
+    if "nfl_id" in full_play.columns:
+        labels = full_play.apply(_other_label, axis=1)
+        if target_nfl_id is not None:
+            target_mask = full_play["nfl_id"].astype("Int64").eq(target_nfl_id)
+            if target_mask.any():
+                target_pos = None
+                if pos_col:
+                    vals = full_play.loc[target_mask, pos_col].dropna().astype(str)
+                    target_pos = vals.iloc[0] if len(vals) else None
+
+                target_label = str(player_name).strip() or (
+                    str(full_play.loc[target_mask, name_col].dropna().astype(str).iloc[0]).strip()
+                    if name_col and full_play.loc[target_mask, name_col].notna().any()
+                    else "Target"
+                )
+                if target_pos:
+                    target_label = f"{target_label} ({target_pos})"
+                labels = labels.mask(target_mask, target_label)
+        full_play = full_play.assign(_label=labels)
+
+    # Optional filtering: only show Defense + QB + Targeted Receiver
+    if show_only_defense_qb_target:
+        keep_mask = pd.Series(False, index=full_play.index)
+        if side_col:
+            keep_mask |= full_play[side_col].astype(str).eq("Defense")
+        if role_col:
+            keep_mask |= full_play[role_col].astype(str).eq("Passer")
+            keep_mask |= full_play[role_col].astype(str).eq("Targeted Receiver")
+        if pos_col:
+            keep_mask |= full_play[pos_col].astype(str).eq("QB")
+        if target_nfl_id is not None and "nfl_id" in full_play.columns:
+            keep_mask |= full_play["nfl_id"].astype("Int64").eq(target_nfl_id)
+        full_play = full_play.loc[keep_mask].copy()
+
+        # Make QB label explicit
+        if "_label" in full_play.columns and (role_col or pos_col):
+            qb_mask = pd.Series(False, index=full_play.index)
+            if role_col:
+                qb_mask |= full_play[role_col].astype(str).eq("Passer")
+            if pos_col:
+                qb_mask |= full_play[pos_col].astype(str).eq("QB")
+            full_play.loc[qb_mask, "_label"] = "QB"
+
+    # Optional: add a fixed on-field annotation per frame for Actual/Pred/Residual.
+    if pred_df is not None and len(pred_df) > 0 and "_frame_anim" in full_play.columns:
+        work = pred_df.copy()
+        if pred_actual_col not in work.columns or pred_pred_col not in work.columns:
+            work = None
+        else:
+            work[pred_actual_col] = pd.to_numeric(work[pred_actual_col], errors="coerce")
+            work[pred_pred_col] = pd.to_numeric(work[pred_pred_col], errors="coerce")
+
+        if work is not None:
+            frames = np.sort(full_play["_frame_anim"].unique())
+            n_frames = len(frames)
+            n_steps = len(work)
+            if n_frames > 0 and n_steps > 0:
+                # Map frame index -> timestep index
+                idxs = np.round(np.linspace(0, n_steps - 1, n_frames)).astype(int)
+                actual_vals = work[pred_actual_col].iloc[idxs].to_numpy()
+                pred_vals = work[pred_pred_col].iloc[idxs].to_numpy()
+                resid_vals = actual_vals - pred_vals
+
+                ann = pd.DataFrame({
+                    "_frame_anim": frames,
+                    x_col: annotation_xy[0],
+                    y_col: annotation_xy[1],
+                    "nfl_id": -1,
+                    "s": 0.0,
+                    "_label": [
+                        f"Actual: {a:.2f} | Pred: {p:.2f} | Resid: {r:+.2f}"
+                        for a, p, r in zip(actual_vals, pred_vals, resid_vals)
+                    ],
+                })
+                full_play = pd.concat([full_play, ann], ignore_index=True)
 
     title = title_prefix or f"{player_name} | game {game_id} play {play_id}"
     if truespeed_score is not None:
         title += f" | TrueSpeed: {truespeed_score:.3f}"
 
-    return animate_route_on_field(full_play, title=title, x_col=x_col, y_col=y_col, frame_col=frame_col, renderer=renderer)
+    return animate_route_on_field(
+        full_play,
+        title=title,
+        x_col=x_col,
+        y_col=y_col,
+        frame_col="_frame_anim",
+        text_col="_label" if "_label" in full_play.columns else None,
+        hover_cols=("_label", "s", "a", "dir"),
+        renderer=renderer,
+    )
 
 
 def get_representative_play(
@@ -294,3 +458,141 @@ def plot_market_inefficiency_correlation(
 
     fig.tight_layout()
     return fig
+
+
+def plot_truespeed_distribution(
+    df: pd.DataFrame,
+    *,
+    score_col: Optional[str] = None,
+    title: str = "TrueSpeed distribution",
+    bins: int = 25,
+) -> "plt.Figure":
+    """Histogram to communicate what is 'common' vs 'rare' in TrueSpeed.
+
+    If the input contains a preserved raw column (``TrueSpeed_raw``), this
+    defaults to plotting that residual-based value so the distribution is
+    interpretable. Otherwise it falls back to ``TrueSpeed``.
+    """
+    work = df.copy()
+
+    effective_col = score_col
+    if effective_col is None:
+        effective_col = "TrueSpeed_raw" if "TrueSpeed_raw" in work.columns else "TrueSpeed"
+    if effective_col not in work.columns:
+        raise KeyError(f"plot_truespeed_distribution: df missing score_col={effective_col!r}")
+
+    work[effective_col] = pd.to_numeric(work[effective_col], errors="coerce")
+    work = work.dropna(subset=[effective_col])
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.hist(work[effective_col].to_numpy(), bins=bins)
+    ax.set_title(title)
+    ax.set_xlabel(effective_col)
+    ax.set_ylabel("Count")
+    ax.grid(True, linestyle="--", alpha=0.3)
+    fig.tight_layout()
+    return fig
+
+
+def plot_truespeed_leaderboard(
+    df_scorecard: pd.DataFrame,
+    *,
+    player_col: str = "player_name",
+    score_col: str = "TrueSpeed",
+    min_targets_col: str = "Total_Targets",
+    min_targets: int = 15,
+    top_n: int = 20,
+    title: str = "Top TrueSpeed receivers (volume-qualified)",
+) -> "plt.Figure":
+    """Horizontal bar chart for quick scouting consumption."""
+    work = df_scorecard.copy()
+    if min_targets_col in work.columns:
+        work = work[pd.to_numeric(work[min_targets_col], errors="coerce").fillna(0) >= int(min_targets)].copy()
+    work[score_col] = pd.to_numeric(work[score_col], errors="coerce")
+    work = work.dropna(subset=[score_col])
+    work = work.sort_values(score_col, ascending=False).head(top_n)
+
+    fig, ax = plt.subplots(figsize=(10, max(4, int(0.35 * len(work)))))
+    ax.barh(work[player_col].astype(str), work[score_col].to_numpy())
+    ax.invert_yaxis()
+    ax.set_title(title)
+    ax.set_xlabel(score_col)
+    ax.grid(True, axis="x", linestyle="--", alpha=0.3)
+    fig.tight_layout()
+    return fig
+
+
+def plot_truespeed_context_splits(
+    df_play: pd.DataFrame,
+    *,
+    score_col: str = "TrueSpeed",
+    split_col: str = "pass_length",
+    title: Optional[str] = None,
+    min_n: int = 200,
+) -> "plt.Figure":
+    """Average TrueSpeed by a context split (e.g., pass_length, coverage, location).
+
+    This is intended to answer: *where does this metric matter most?*
+    """
+    work = df_play.copy()
+    if split_col not in work.columns:
+        raise KeyError(f"plot_truespeed_context_splits: df_play missing split_col={split_col!r}")
+
+    work[score_col] = pd.to_numeric(work[score_col], errors="coerce")
+    work = work.dropna(subset=[score_col, split_col])
+    agg = (
+        work.groupby(split_col)
+        .agg(mean_true_speed=(score_col, "mean"), n=(score_col, "size"))
+        .reset_index()
+    )
+    agg = agg[agg["n"] >= int(min_n)].sort_values("mean_true_speed", ascending=False)
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.bar(agg[split_col].astype(str), agg["mean_true_speed"].to_numpy())
+    ax.set_title(title or f"Average {score_col} by {split_col} (n≥{min_n})")
+    ax.set_xlabel(split_col)
+    ax.set_ylabel(f"Mean {score_col}")
+    ax.tick_params(axis="x", rotation=30)
+    ax.grid(True, axis="y", linestyle="--", alpha=0.3)
+    fig.tight_layout()
+    return fig
+
+
+def select_exemplar_plays_for_film(
+    df_play: pd.DataFrame,
+    *,
+    id_cols: Tuple[str, str] = ("game_id", "play_id"),
+    score_col: str = "TrueSpeed",
+    player_col: str = "player_name",
+    player_name: Optional[str] = None,
+    n_each: int = 3,
+) -> pd.DataFrame:
+    """Return a compact set of exemplar plays for film review.
+
+    Strategy:
+      - Take top-N and bottom-N TrueSpeed plays (tails) for the player
+      - Also take mid-percentile 'typical' plays to anchor expectations
+
+    Output is a dataframe of plays, ready to feed into `animate_speed_comparison`.
+    """
+    work = df_play.copy()
+    work[score_col] = pd.to_numeric(work[score_col], errors="coerce")
+    work = work.dropna(subset=[score_col])
+
+    if player_name is not None and player_col in work.columns:
+        work = work[work[player_col].astype(str) == str(player_name)].copy()
+
+    if len(work) == 0:
+        return work.head(0)
+
+    work = work.sort_values(score_col)
+    low = work.head(int(n_each))
+    high = work.tail(int(n_each))
+
+    # "Typical" plays: closest to median
+    med = work[score_col].median()
+    mid = work.assign(_dist=(work[score_col] - med).abs()).sort_values("_dist").head(int(n_each)).drop(columns=["_dist"])
+
+    cols = [c for c in [*id_cols, player_col, score_col] if c in work.columns]
+    out = pd.concat([high, mid, low], ignore_index=True).drop_duplicates(subset=list(id_cols))
+    return out.loc[:, cols] if cols else out

@@ -151,3 +151,14 @@ def load_bdb_csvs(
         pd.read_csv(group_output_csv),
         pd.read_csv(supplementary_csv),
     )
+
+
+def load_truespeed_csv(path: str | Path) -> pd.DataFrame:
+    """Load the exported TrueSpeed scorecard/leaderboard CSV.
+
+    This exists to make the notebook/report code cleaner and explicit.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"TrueSpeed.csv not found: {path}")
+    return pd.read_csv(path)
