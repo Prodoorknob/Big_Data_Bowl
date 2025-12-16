@@ -132,7 +132,7 @@ def normalize_to_100(series: pd.Series, *, decimals: int = 1) -> pd.Series:
     mn = s.min()
     mx = s.max()
     if pd.isna(mn) or pd.isna(mx) or mx == mn:
-        return pd.Series(np.zeros(len(s)), index=s.index).round(decimals)
+        return pd.Series(50.0, index=s.index).round(decimals)
     out = 100.0 * (s - mn) / (mx - mn)
     return out.round(decimals)
 
@@ -180,7 +180,9 @@ def compute_route_execution_score(
     tmp["_dev"] = dev
     dev_play = tmp.groupby(list(id_cols), sort=False)["_dev"].mean().reset_index()
 
-    dev_play[out_col] = normalize_to_100(dev_play["_dev"],  decimals=1)
+    # Invert: lower deviation = better execution = higher score
+    # Negate the deviation before normalizing
+    dev_play[out_col] = normalize_to_100(-dev_play["_dev"],  decimals=1)
     dev_play = dev_play.drop(columns=["_dev"])
     return dev_play
 
@@ -295,7 +297,7 @@ def build_truespeed_scorecard(
         df_scored.groupby(player_name_col, dropna=True)
         .agg(
             TrueSpeed=(truespeed_col, "mean"),
-            RouteExecution=(route_exec_col, "mean"),
+            RouteExecIQ=(route_exec_col, "mean"),  # Keep as RouteExecIQ before normalization
             Scored_Count=(id_cols[0], "count"),  # count of scored plays
         )
     )
@@ -330,7 +332,9 @@ def build_truespeed_scorecard(
     # --- 9) normalize scores to 0–100 (optional) ---
     if normalize_scores_to_100 and len(df_final) > 0:
         df_final["TrueSpeed"] = _minmax_100(df_final["TrueSpeed"]).round(1)
-        df_final["RouteExecution"] = _minmax_100(df_final["RouteExecution"]).round(1)
+        df_final["RouteExecution"] = _minmax_100(df_final["RouteExecIQ"]).round(1)
+        # Drop the original RouteExecIQ column after creating RouteExecution
+        df_final = df_final.drop(columns=["RouteExecIQ"])
 
     # optional ranking
     if len(df_final) > 0:
@@ -344,6 +348,10 @@ def build_truespeed_scorecard(
         "Total_Targets", "Total_Yards", "Total_EPA", "Catch_Rate",
         "Explosive_Plays", "Success_Rate", "Yards_Per_Target", "EPA_Per_Target",
     ]
+    # If normalization wasn't applied, RouteExecIQ will still be present
+    if not normalize_scores_to_100 and "RouteExecIQ" in df_final.columns:
+        # Replace RouteExecution with RouteExecIQ in the column list
+        cols = [c if c != "RouteExecution" else "RouteExecIQ" for c in cols]
     if "Rank" in df_final.columns:
         cols = ["Rank"] + cols
 

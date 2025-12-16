@@ -38,8 +38,23 @@ def engineer_route_features(
     x_col: str = X_NORM,
     y_col: str = Y_NORM,
     speed_col: str = SPEED,
+    accel_col: str = "a",
+    dir_col: str = "dir",
 ) -> pd.DataFrame:
-    """Engineer per-route (per play/player) features from pre-throw tracking rows."""
+    """Engineer per-route (per play/player) features from pre-throw tracking rows.
+    
+    Creates 15 route features matching the notebook implementation:
+    1. route_len (route_distance)
+    2. delta_x (route_depth) 
+    3. delta_y_abs (route_width - ABSOLUTE VALUE)
+    4. x_end, y_end (final position)
+    5. max_speed, mean_speed, std_speed
+    6. max_accel, mean_accel (if available)
+    7. direction_changes (>30 degree changes)
+    8. route_frames, route_duration
+    9. lateral_range (max-min Y)
+    10. straightness (route_efficiency)
+    """
     df = df_routes.copy()
     df = df.sort_values(list(id_cols) + [frame_col])
 
@@ -76,7 +91,32 @@ def engineer_route_features(
         max_speed = pd.Series(np.nan, index=x0.index)
         std_speed = pd.Series(np.nan, index=x0.index)
 
+    # Acceleration summaries (if available)
+    if accel_col in df.columns:
+        mean_accel = g[accel_col].mean()
+        max_accel = g[accel_col].max()
+    else:
+        mean_accel = pd.Series(0.0, index=x0.index)
+        max_accel = pd.Series(0.0, index=x0.index)
+
+    # Direction changes (>30 degrees)
+    # This matches the notebook implementation
+    if dir_col in df.columns:
+        df["_dir_diff"] = g[dir_col].diff().abs()
+        # Handle wrap-around: 359->1 is 2 degrees, not 358
+        df["_dir_diff"] = df["_dir_diff"].apply(
+            lambda x: min(x, 360 - x) if not pd.isna(x) else 0
+        )
+        direction_changes = g["_dir_diff"].apply(lambda x: (x > 30).sum())
+    else:
+        direction_changes = pd.Series(0, index=x0.index)
+
+    # Lateral range (max Y - min Y)
+    lateral_range = g[y_col].max() - g[y_col].min()
+
+    # Route duration (frames * 0.1 seconds per frame)
     n_frames = g[frame_col].count()
+    route_duration = n_frames * 0.1
 
     feats = pd.DataFrame({
         "route_frames": n_frames,
@@ -86,15 +126,20 @@ def engineer_route_features(
         "y_end": y1,
         "delta_x": dx,
         "delta_y": dy,
+        "delta_y_abs": dy.abs(),  # CRITICAL: absolute value for route width
         "route_len": route_len,
         "direct_dist": direct_dist,
         "straightness": straightness,
         "mean_speed": mean_speed,
         "max_speed": max_speed,
         "std_speed": std_speed,
+        "mean_accel": mean_accel,
+        "max_accel": max_accel,
+        "direction_changes": direction_changes,
+        "lateral_range": lateral_range,
+        "route_duration": route_duration,
     }).reset_index()
 
-    # cleanup temp cols (optional; df is local anyway)
     return feats
 def cluster_routes_kmeans(
     route_features: pd.DataFrame,
