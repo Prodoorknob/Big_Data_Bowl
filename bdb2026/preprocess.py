@@ -438,6 +438,81 @@ def add_converge_rate_from_labels(
 
     return out.drop(columns=["_dist_true_to_land"], errors="ignore")
 
+def compute_catch_separation(
+    df_tracking: pd.DataFrame,
+    *,
+    id_cols: Tuple[str, str] = (GAME_ID, PLAY_ID),
+    frame_col: str = FRAME_ID,
+    nfl_id_col: str = NFL_ID,
+    x_col: str = X_NORM,
+    y_col: str = Y_NORM,
+    side_col: str = "player_side",
+) -> pd.DataFrame:
+    """
+    Calculates distance to nearest defender at catch point for ALL offensive players.
+    
+    The catch point is defined as the last frame of each play. This measures
+    separation between receivers and nearest defenders to distinguish contested
+    catches from scheme wins.
+    
+    Parameters
+    ----------
+    df_tracking:
+        Full tracking data with all players (offense and defense).
+    id_cols:
+        Play identifier columns (game_id, play_id).
+    frame_col:
+        Frame ID column.
+    nfl_id_col:
+        Player ID column.
+    x_col, y_col:
+        Normalized coordinate columns.
+    side_col:
+        Column indicating 'Offense' vs 'Defense' (case-sensitive).
+    
+    Returns
+    -------
+    DataFrame with [game_id, play_id, nfl_id, sep_at_catch] for all offensive players.
+    Wide open plays (no defenders) are capped at 10.0 yards.
+    """
+    # 1. Identify 'Catch Frame' (Last frame of the play)
+    catch_frames = df_tracking.groupby(list(id_cols))[frame_col].max().reset_index()
+    
+    # 2. Filter tracking to just the catch frames
+    df_catch = df_tracking.merge(catch_frames, on=list(id_cols) + [frame_col])
+
+    # 3. Split Offense vs Defense
+    df_offense = df_catch[df_catch[side_col] == 'Offense'].copy()
+    df_defense = df_catch[df_catch[side_col] == 'Defense'].copy()
+
+    # 4. Cartesian Product (Every Offense vs Every Defense on that play)
+    pairs = df_offense.merge(
+        df_defense,
+        on=list(id_cols),
+        suffixes=('_off', '_def')
+    )
+
+    # 5. Euclidean Distance
+    pairs['dist'] = np.sqrt(
+        (pairs[f"{x_col}_off"] - pairs[f"{x_col}_def"])**2 + 
+        (pairs[f"{y_col}_off"] - pairs[f"{y_col}_def"])**2
+    )
+
+    # 6. Min Distance per Player (Group by game, play, AND OFFENSIVE PLAYER)
+    sep_df = pairs.groupby(list(id_cols) + [f"{nfl_id_col}_off"])['dist'].min().reset_index()
+    
+    # 7. Rename for clean merge
+    sep_df.rename(columns={
+        f"{nfl_id_col}_off": nfl_id_col, 
+        'dist': 'sep_at_catch'
+    }, inplace=True)
+
+    # Handle wide open / untracked (fill with cap)
+    sep_df['sep_at_catch'] = sep_df['sep_at_catch'].fillna(10.0)
+
+    return sep_df
+
+
 def attach_output_labels(
     df_post: pd.DataFrame,
     df_out: pd.DataFrame,

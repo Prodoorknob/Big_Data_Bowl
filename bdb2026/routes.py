@@ -18,6 +18,7 @@ from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 
 from .config import GAME_ID, PLAY_ID, NFL_ID, FRAME_ID, X_NORM, Y_NORM, SPEED
+from .preprocess import compute_catch_separation
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,7 @@ class RouteClusterResult:
 def engineer_route_features(
     df_routes: pd.DataFrame,
     *,
+    df_raw_tracking: Optional[pd.DataFrame] = None,
     id_cols: Tuple[str, str, str] = (GAME_ID, PLAY_ID, NFL_ID),
     frame_col: str = FRAME_ID,
     x_col: str = X_NORM,
@@ -54,6 +56,18 @@ def engineer_route_features(
     8. route_frames, route_duration
     9. lateral_range (max-min Y)
     10. straightness (route_efficiency)
+    
+    Optionally adds:
+    11. sep_at_catch - Separation from nearest defender at catch point
+        (if df_raw_tracking is provided)
+    
+    Parameters
+    ----------
+    df_routes:
+        Pre-throw tracking data for route runners.
+    df_raw_tracking:
+        Full tracking data (all players) to compute catch separation.
+        If None, sep_at_catch is not added.
     """
     df = df_routes.copy()
     df = df.sort_values(list(id_cols) + [frame_col])
@@ -140,6 +154,21 @@ def engineer_route_features(
         "route_duration": route_duration,
     }).reset_index()
 
+    # Add catch separation if tracking data provided
+    if df_raw_tracking is not None:
+        sep_df = compute_catch_separation(
+            df_raw_tracking,
+            id_cols=(GAME_ID, PLAY_ID),
+            frame_col=frame_col,
+            nfl_id_col=NFL_ID,
+            x_col=x_col,
+            y_col=y_col,
+        )
+        # Merge on game_id, play_id, nfl_id to avoid broadcasting
+        feats = feats.merge(sep_df, on=[GAME_ID, PLAY_ID, NFL_ID], how='left')
+        # Fill NaNs with 10.0 (wide open)
+        feats['sep_at_catch'] = feats['sep_at_catch'].fillna(10.0)
+
     return feats
 def cluster_routes_kmeans(
     route_features: pd.DataFrame,
@@ -156,7 +185,7 @@ def cluster_routes_kmeans(
         # Default: exclude ID-like and start/end absolute positions which can dominate.
         candidate = [
             "route_frames", "delta_x", "delta_y", "route_len", "direct_dist",
-            "straightness", "mean_speed", "max_speed", "std_speed"
+            "straightness", "mean_speed", "max_speed", "std_speed", "sep_at_catch"
         ]
         feature_cols = [c for c in candidate if c in feats.columns]
 
